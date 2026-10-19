@@ -6,7 +6,7 @@ Usage:
         [--timepoints-before 6] [--correction ignore|none]
         [--threshold-exclude-um 1.0] [--pole-profile-radius java|um]
         [--half-size-um 20] [--z-extra-um 4] [--workers N]
-        [--qc-dir DIR | --no-qc]
+        [--membrane LABELS] [--qc-dir DIR] [--qc-debug | --no-qc]
     python scripts/spindle_features.py --write-default-config FILE
 
 TRACKS is a geff store (corrected tracks; node id = label in the segmentation).
@@ -36,7 +36,11 @@ from pathlib import Path
 from funtracks.import_export import import_from_geff
 
 from motile_tracker.import_export.geff_io import write_geff_over
-from motile_tracker.membrane.io import read_label_file
+from motile_tracker.membrane.io import (
+    load_membrane_labels,
+    read_label_file,
+    save_membrane_labels,
+)
 from motile_tracker.spindle import add_spindle_features, measure_tracks
 from motile_tracker.spindle.config import (
     DEFAULT_CONFIG_HEADER,
@@ -93,10 +97,27 @@ def main(argv=None):
     p.add_argument("--half-size-um", type=float, default=None)
     p.add_argument("--z-extra-um", type=float, default=None)
     p.add_argument("--workers", type=int, default=1)
-    p.add_argument("--qc-dir", type=Path, default=None)
     p.add_argument(
-        "--no-qc", action="store_true", help="no QC PNGs (no matplotlib needed)"
+        "--membrane",
+        type=Path,
+        default=None,
+        help="membrane cell labels (zarr/tiff/folder) for the spindle_cell_* "
+        "features; default: the input geff's membrane_labels, if any",
     )
+    p.add_argument(
+        "--qc",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="QC images: one spindle-aligned PNG per candidate (axis left to "
+        "right; DNA, tubulin, DNA/spindle/cell outlines) + overview.png "
+        "(--no-qc: none, no matplotlib needed)",
+    )
+    p.add_argument(
+        "--qc-debug",
+        action="store_true",
+        help="also the threshold panels (MIPs of the raw crop) per candidate",
+    )
+    p.add_argument("--qc-dir", type=Path, default=None)
     args = p.parse_args(argv)
 
     if args.write_default_config is not None:
@@ -121,16 +142,19 @@ def main(argv=None):
     tracks = import_from_geff(in_geff)
     config.pipeline = resolve_spacing(config.pipeline, tracks)
     if all(s == 1.0 for s in config.pipeline.spacing):
-        print(
-            "warning: voxel size 1,1,1 (as stored with the tracks?); set --spacing z,y,x in um"
+        # The spindle values are in um (and um3), so a voxel size of 1 taken
+        # over from a geff that stores none would make them pixel values.
+        raise SystemExit(
+            "voxel size 1,1,1 (the tracks store no physical scale): pass "
+            "--spacing z,y,x in um (or [pipeline] spacing), e.g. --spacing 1,0.26,0.26"
         )
     params, settings = config.pipeline, config.spindle3d
     run = out_geff.stem
     out_dir = out_geff.parent
     out_dir.mkdir(parents=True, exist_ok=True)
-    qc_dir = None if args.no_qc else (args.qc_dir or out_dir / f"qc_{run}")
+    qc_dir = (args.qc_dir or out_dir / f"qc_{run}") if args.qc else None
     if qc_dir is not None:
-        from motile_tracker.spindle.qc import contact_sheet, draw_qc
+        from motile_tracker.spindle.qc import contact_sheet, draw_qc, draw_rotated
 
         qc_dir.mkdir(parents=True, exist_ok=True)
         for old in qc_dir.glob("*.png"):
@@ -146,6 +170,23 @@ def main(argv=None):
 
     tubulin = read_label_file(args.tubulin)
     dna = read_label_file(args.dna)
+    in_labels = load_membrane_labels(in_geff)
+    if args.membrane is not None:
+        membrane = read_label_file(args.membrane)
+        print(f"cell features from {args.membrane}")
+    elif in_labels is not None:
+        membrane = in_labels
+        print(f"cell features from the membrane labels in {in_geff.name}")
+    else:
+        membrane = None
+        print("no membrane labels: spindle_cell_* features are left NaN")
+    if membrane is not None and tuple(membrane.shape) != tuple(
+        tracks.segmentation.shape
+    ):
+        raise SystemExit(
+            f"membrane labels {tuple(membrane.shape)} do not match the "
+            f"segmentation {tuple(tracks.segmentation.shape)}"
+        )
     t0 = time.perf_counter()
     rows, diag, thumbs = [], [], []
     for row, case, res in measure_tracks(
@@ -155,6 +196,7 @@ def main(argv=None):
         params,
         settings,
         workers=args.workers,
+        membrane=membrane,
     ):
         rows.append(row)
         if res.get("diag"):
@@ -166,14 +208,19 @@ def main(argv=None):
             )
         if qc_dir is not None and case:
             tag = row["spindle_status"].split(":")[0]
-            draw_qc(
-                case,
-                res,
-                row,
-                params.spacing,
-                qc_dir / f"node{row['node']}_t{row['t']}_{tag}.png",
-                thumbs,
+            name = f"node{row['node']}_t{row['t']}_{tag}"
+            drawn = draw_rotated(
+                case, res, row, params.spacing, qc_dir / f"{name}.png", thumbs
             )
+            if args.qc_debug or not drawn:  # no poles: the raw-crop panels
+                draw_qc(
+                    case,
+                    res,
+                    row,
+                    params.spacing,
+                    qc_dir / f"{name}_{'debug' if drawn else 'crop'}.png",
+                    None if drawn else thumbs,
+                )
         print(
             f"  node {row['node']} t{row['t']} -{row['spindle_frames_before_division']}: "
             f"{row['spindle_status']} | {row.get('spindle_stage', '')} | "
@@ -206,6 +253,10 @@ def main(argv=None):
             w.writerows(sorted(diag, key=lambda r: (r["t"], r["node"])))
     add_spindle_features(tracks, rows)
     write_geff_over(tracks, out_geff)
+    if in_labels is not None:
+        # keep the membrane cells, so spindle and membrane steps can run in
+        # either order
+        print("copied membrane labels:", save_membrane_labels(out_geff, in_labels))
     n_ok = sum(r["spindle_status"] == "ok" for r in rows)
     n_meta = sum(
         r["spindle_status"] == "ok" and r.get("spindle_is_metaphase") == 1 for r in rows

@@ -425,6 +425,90 @@ def iso_to_frame_um(p_iso, crop_lo_px, spacing, vs: float = ISO) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# the cell (optional: only with membrane labels)
+# ---------------------------------------------------------------------------
+def cell_stats(mem_frame: np.ndarray, cell_id: int, spacing) -> dict | None:
+    """Volume, equivalent diameter, centroid (um of the frame) and axes of one
+    cell in a membrane label frame; None if the label is absent."""
+    sp = np.asarray(spacing, float)
+    mask = mem_frame == cell_id
+    box = ndi.find_objects(mask.astype(np.uint8))
+    if not box or box[0] is None:
+        return None
+    box = box[0]
+    pts = np.argwhere(mask[box]).astype(float)
+    pts += np.array([b.start for b in box], float)
+    pts *= sp
+    volume = float(len(pts) * np.prod(sp))
+    centroid = pts.mean(0)
+    evals, evecs = np.linalg.eigh(np.cov((pts - centroid).T))
+    axes = np.sqrt(np.clip(5.0 * evals, 0, None))  # ellipsoid semi-axes (um)
+    return {
+        "cell_id": int(cell_id),
+        "volume_um3": volume,
+        "diameter_um": float((6.0 * volume / np.pi) ** (1 / 3)),
+        "centroid_um": centroid,
+        "long_axis": unit_sign(evecs[:, -1]),
+        "elongation": float(axes[-1] / axes[0]) if axes[0] > 0 else float("nan"),
+    }
+
+
+def cell_features(cell: dict | None, row: dict) -> dict:
+    """spindle_cell_* features from the cell and the measured spindle in `row`
+    (NaN / -1 where the cell or the spindle is missing)."""
+    nan = float("nan")
+    out = {
+        "spindle_cell_id": -1,
+        "spindle_cell_volume_um3": nan,
+        "spindle_cell_diameter_um": nan,
+        "spindle_cell_elongation": nan,
+        "spindle_length_to_cell_diameter": nan,
+        "spindle_center_to_cell_center_um": nan,
+        "spindle_center_offset_rel": nan,
+        "spindle_axis_vs_cell_long_axis_deg": nan,
+    }
+    if cell is None:
+        return out
+    out.update(
+        spindle_cell_id=cell["cell_id"],
+        spindle_cell_volume_um3=cell["volume_um3"],
+        spindle_cell_diameter_um=cell["diameter_um"],
+        spindle_cell_elongation=cell["elongation"],
+    )
+    if row.get("spindle_status") != "ok":
+        return out
+    center = np.array([row.get(f"spindle_center_{a}_um", nan) for a in "zyx"], float)
+    axis = np.array([row.get(f"spindle_axis_{a}", nan) for a in "zyx"], float)
+    length = float(row.get("spindle_length_um", nan))
+    if np.all(np.isfinite(center)):
+        offset = float(np.linalg.norm(center - cell["centroid_um"]))
+        out["spindle_center_to_cell_center_um"] = offset
+        out["spindle_center_offset_rel"] = offset / (cell["diameter_um"] / 2.0)
+    if np.isfinite(length):
+        out["spindle_length_to_cell_diameter"] = length / cell["diameter_um"]
+    if np.all(np.isfinite(axis)):
+        out["spindle_axis_vs_cell_long_axis_deg"] = angle_deg(axis, cell["long_axis"])
+    return out
+
+
+def attach_cell(case: dict, tracks, node: int, mem_frame: np.ndarray, p) -> None:
+    """Add the node's cell (stats, and its mask on the crop) to `case`.
+
+    The cell is the membrane label equal to the node's membrane_id feature
+    (if set), else to the node id.
+    """
+    cell_id = int(node)
+    if "membrane_id" in tracks.features:
+        mid = tracks.get_node_attr(node, "membrane_id")
+        if mid is not None and int(mid) > 0:
+            cell_id = int(mid)
+    case["cell"] = cell_stats(mem_frame, cell_id, p.spacing)
+    lo = np.asarray(case["meta"]["crop_lo_px"])
+    hi = lo + np.asarray(case["meta"]["crop_shape"])
+    case["cell_crop"] = padded_crop(mem_frame == cell_id, lo, hi, False)
+
+
+# ---------------------------------------------------------------------------
 # one crop
 # ---------------------------------------------------------------------------
 def measure_crop(job: dict) -> dict:
@@ -617,6 +701,8 @@ def _finish_row(row: dict, case: dict, res: dict, p: SpindleParams) -> dict:
         spindle_is_metaphase=ismeta,
         spindle_plate_rim_ratio=rim,
     )
+    if "cell" in case:
+        row.update(cell_features(case["cell"], row))
     return row
 
 
@@ -689,6 +775,7 @@ def measure_tracks(
     timepoints_before: int | None = None,
     workers: int = 1,
     progress: Callable[[int, int], None] | None = None,
+    membrane=None,
 ) -> Iterator[tuple[dict, dict, dict]]:
     """Measure every candidate node; yields (row, case, result) per node.
 
@@ -705,6 +792,10 @@ def measure_tracks(
             predecessors (default params.timepoints_before).
         workers: Crops measured in parallel processes.
         progress: Called with (number done, number of candidates).
+        membrane: Optional membrane cell labels (t, z, y, x), same shape as the
+            segmentation (e.g. the geff's membrane_labels). With them the rows
+            get spindle_cell_* features and the cases the cell's mask on the
+            crop ("cell_crop", for the QC images); without, those stay NaN.
     """
     p = params or SpindleParams()
     if p.correction not in ("ignore", "none"):
@@ -736,6 +827,7 @@ def measure_tracks(
             a_frame = np.asarray(tubulin[t])
             d_frame = np.asarray(dna[t])
             seg_frame = np.asarray(tracks.segmentation[t])
+            mem_frame = None if membrane is None else np.asarray(membrane[t])
             for cand in by_t[t]:
                 node = cand[0]
                 try:
@@ -760,6 +852,8 @@ def measure_tracks(
                         {"status": row["spindle_status"], "qc": {}, "diag": {}},
                     )
                     continue
+                if mem_frame is not None:
+                    attach_cell(case, tracks, node, mem_frame, p)
                 job = {
                     "tub": case["tub"],
                     "dna": case["dna"],
@@ -776,7 +870,7 @@ def measure_tracks(
                     yield _finish_row(row, case, res, p), case, res
                 else:
                     pending.append((row, case, pool.submit(measure_crop, job)))
-            del a_frame, d_frame, seg_frame
+            del a_frame, d_frame, seg_frame, mem_frame
             still = []
             for row, case, fut in pending:
                 if fut.done():

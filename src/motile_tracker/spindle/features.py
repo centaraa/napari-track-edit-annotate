@@ -80,6 +80,23 @@ SPINDLE_FEATURES: dict[str, Feature] = {
     "spindle_axis_vs_centrosome_deg": _feature(
         "float", "Axis vs centrosome line (deg)", _NAN
     ),
+    # the cell (only with membrane labels; NaN / -1 otherwise)
+    "spindle_cell_id": _feature("int", "Cell label (membrane)", -1),
+    "spindle_cell_volume_um3": _feature("float", "Cell volume (um3)", _NAN),
+    "spindle_cell_diameter_um": _feature("float", "Cell eq. diameter (um)", _NAN),
+    "spindle_cell_elongation": _feature("float", "Cell long/short axis", _NAN),
+    "spindle_length_to_cell_diameter": _feature(
+        "float", "Spindle length / cell diameter", _NAN
+    ),
+    "spindle_center_to_cell_center_um": _feature(
+        "float", "Spindle centre to cell centre (um)", _NAN
+    ),
+    "spindle_center_offset_rel": _feature(
+        "float", "Spindle centre offset / cell radius", _NAN
+    ),
+    "spindle_axis_vs_cell_long_axis_deg": _feature(
+        "float", "Axis vs cell long axis (deg)", _NAN
+    ),
     # QC flags
     "spindle_flag_pole_on_box_edge": _feature("int", "Pole on lateral box edge", -1),
     "spindle_flag_axis_vs_plate": _feature(

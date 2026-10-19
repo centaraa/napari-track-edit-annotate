@@ -6,7 +6,13 @@ The measurement is a Python re-implementation of the Fiji plugin Spindle3D v0.8.
 
 ## When and how to run
 
-Run it once at the end, after the nuclei are corrected, like the membrane merge. It reads the nuclei segmentation and the division events from the tracks. Later edits to the nuclei do not update the spindle features, so rerun it after them.
+Run it after the nuclei are corrected. It reads the nuclei segmentation and the division events from the tracks. Later edits to the nuclei do not update the spindle features, so rerun it after them.
+
+**Order with the membrane step.** The two steps can run in either order:
+- Spindle after membrane: the input geff's `membrane_labels` give the `spindle_cell_*` features and are copied into the output geff; the `membrane_*` features are kept.
+- Spindle before membrane: the `spindle_cell_*` features stay NaN; `merge_membranes.py` keeps the `spindle_*` features. Rerun the spindle step afterwards for the cell features.
+
+**Units.** All spindle values are in µm (µm³, degrees). The geff of these tracks stores no physical voxel size (1,1,1), so the run stops unless `--spacing` (or `[pipeline] spacing`) gives it in µm. The membrane step's own `membrane_volume` stays in voxels.
 
 ```bash
 uv run python scripts/spindle_features.py TRACKS TUBULIN DNA OUT.geff --spacing 1,0.26,0.26 --max-frame 454 --workers 4
@@ -25,7 +31,7 @@ uv run python scripts/spindle_view.py OUT.geff TUBULIN DNA --node 9449     # or 
 - `<stem>_spindle.csv`: one row per candidate, with the features plus diagnostics.
 - `<stem>_config.toml`: the complete resolved config of the run (all values, both sections). Pass it back with `--config` to reproduce the run; `spindle_view.py` reads it.
 - `<stem>_threshold_diagnostic.csv`: the spindle thresholds per node. These are internal intensity values, not features.
-- `qc_<stem>/`: one PNG per candidate plus `overview.png`. Skip them with `--no-qc`; matplotlib is only needed for the QC images.
+- `qc_<stem>/` (with `--qc`, the default; off with `--no-qc`, then matplotlib is not needed): one PNG per candidate with the spindle axis from left to right, like the output image of Java Spindle3D (a 36 µm cube aligned on the spindle). It shows slab maximum projections (±1.5 µm) as a top view, a side view (z' towards the stack z) and an end-on view through the plate. DNA is magenta and tubulin green; the outlines are the DNA mask (yellow), the spindle mask (cyan) and, with membrane labels, the cell (white); poles are lime and centrosomes red. `overview.png` collects the side views of all candidates. `--qc-debug` adds the threshold panels (MIPs of the raw crop, threshold exclusion and shell) per candidate; they are also drawn instead when a spindle has no poles.
 
 **Options** (each overrides the same key from `--config`):
 - `--config FILE`: a TOML config (see below).
@@ -35,6 +41,8 @@ uv run python scripts/spindle_view.py OUT.geff TUBULIN DNA --node 9449     # or 
 - `--threshold-exclude-um` (default 1.0).
 - `--pole-profile-radius java|um` (`[spindle3d]`, default `java`): see the quirks below.
 - `--half-size-um` (default 20) and `--z-extra-um` (default 4): the crop size.
+- `--membrane LABELS`: membrane cell labels (zarr, tiff or folder) for the cell features, instead of the input geff's `membrane_labels`.
+- `--qc` / `--no-qc`, `--qc-debug`, `--qc-dir DIR`: the QC images, see above.
 - `--workers N`: crops measured in parallel. About 2 to 6 s per crop. This does not change the results, so it is not part of the config.
 - `--write-default-config FILE`: write the default config and exit.
 
@@ -128,6 +136,12 @@ All positions and lengths are in µm. Positions are in the frame of the original
 | `spindle_n_centrosomes` | 0, 1 or 2 detected puncta |
 | `spindle_centrosome1_z/y/x_um`, `spindle_centrosome2_z/y/x_um` | positions (NaN if absent) |
 | `spindle_centrosome_distance_um`, `spindle_centrosome_axis_z/y/x`, `spindle_axis_vs_centrosome_deg` | with 2 centrosomes: distance, unit vector (same sign convention), angle to the spindle axis |
+| `spindle_cell_id` | the node's cell in the membrane labels (its `membrane_id`, else the node id); −1 without labels |
+| `spindle_cell_volume_um3`, `spindle_cell_diameter_um` | cell volume and equivalent sphere diameter |
+| `spindle_cell_elongation` | longest / shortest cell axis (2nd moments) |
+| `spindle_length_to_cell_diameter` | spindle length / cell diameter |
+| `spindle_center_to_cell_center_um`, `spindle_center_offset_rel` | spindle centre to cell centroid, in µm and as a fraction of the cell radius |
+| `spindle_axis_vs_cell_long_axis_deg` | angle between the spindle axis and the cell's long axis (0–90°) |
 | `spindle_flag_pole_on_box_edge` | QC: a refined pole on a lateral face of the refinement box (it may have jumped sideways) |
 | `spindle_flag_axis_vs_plate` | QC: the axis is more than 10° from the plate normal |
 
@@ -179,6 +193,8 @@ The measured values appear as a text overlay. `--best` picks the ok metaphase wi
   - Hole filling uses scipy's 6-connected background.
   - Eigenvector signs are arbitrary, so the DNA-aligned frame may be flipped relative to Java. Poles A and B can then swap, and box-edge ties can differ by one voxel.
   - Tubulin intensities are evaluated in the DNA-aligned frame (not reported anyway).
-- **Not implemented:** cell mask / cell volume / surface, the composite output image, and `smoothSpindle` (off by default in Java).
+- **Cell.** Java measures the cell from a cell-mask channel; here the cell comes from the membrane labels of the membrane step (`spindle_cell_*`, no surface area).
+- **Output image.** Java writes a multi-channel image stack of the spindle-aligned cube; here the QC PNGs show three projections of the same aligned cube.
+- **Not implemented:** `smoothSpindle` (off by default in Java).
 
 **Background.** An earlier Python port of Spindle3D (Spindle3D_Martino) had several issues: an undefined Otsu threshold on failure, an empty-range return value, an off-by-one in a z slice, border regions that were only counted rather than removed, approximate resampling, a centroid instead of an any-voxel central-region rule, and pole edges without the sign split. This module was written from the Java source instead.
