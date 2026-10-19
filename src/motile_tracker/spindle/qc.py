@@ -263,7 +263,7 @@ def draw_rotated(
 
     Three slab maximum projections (+-`slab_um` um) around the spindle centre:
     top view (x' = axis, y'), side view (x' = axis, z' up = towards the stack
-    z) and end-on through the plate (y', z'). DNA magenta, tubulin green;
+    z) and end-on through the plate (y', z'). DNA magenta, tubulin grey;
     outlines: DNA mask yellow, spindle mask cyan, the cell white (with
     membrane labels); poles lime, centrosomes red. All in um. Returns False
     (nothing drawn) when the spindle has no poles.
@@ -294,12 +294,15 @@ def draw_rotated(
         ),
         ("end", "end-on through the plate", (1, 2), "z' (um)", [-h, h, -h, h]),
     )
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5.8))
+    fig, axes = plt.subplots(1, 3, figsize=(16, 6.4))
     for ax, (name, title, cols, ylab, ext) in zip(axes, views, strict=True):
         p = panels[name]
         rgb = np.zeros((*p["tub"].shape, 3), np.float32)
         d, t = norm(p["dna"], dna_ref), norm(p["tub"], tub_ref)
-        rgb[..., 0], rgb[..., 1], rgb[..., 2] = d, t, d
+        rgb[...] = t[..., None]  # tubulin grey
+        rgb[..., 0] += d  # DNA magenta on top
+        rgb[..., 2] += d
+        rgb = np.clip(rgb, 0, 1)
         origin = "lower" if name == "top" else "upper"
         ax.imshow(rgb, extent=ext, origin=origin, interpolation="nearest")
         n = p["tub"].shape[0]
@@ -340,7 +343,7 @@ def draw_rotated(
         f"{row['spindle_width_avg_um']:.1f} um  tilt {row['spindle_angle_deg']:.0f} deg  "
         f"vs plate normal {row['spindle_axis_dna_offset_deg']:.0f} deg  "
         f"centrosomes {row['spindle_n_centrosomes']}{cell}\n"
-        "DNA magenta, tubulin green; outlines DNA yellow, spindle cyan, cell white; "
+        "DNA magenta, tubulin grey; outlines DNA yellow, spindle cyan, cell white; "
         "poles lime, centrosomes red",
         fontsize=9,
     )
