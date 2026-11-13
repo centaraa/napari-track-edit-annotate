@@ -19,7 +19,7 @@ for more details on the concepts and method.
 
 ----------------------------------
 
-## This fork (centaraa/motile_tracker_annotate)
+## This fork (centaraa/napari-track-edit-annotate)
 
 This repository is a fork of
 [napari-track-edit](https://github.com/live-image-tracking-tools/napari-track-edit),
