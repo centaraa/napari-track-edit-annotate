@@ -3,9 +3,9 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from motile_tracker.data_views.views_coordinator.tracks_viewer import TracksViewer
-from motile_tracker.import_export.geff_io import write_geff_over
-from motile_tracker.membrane.io import (
+from napari_track_edit.data_views.views_coordinator.tracks_viewer import TracksViewer
+from napari_track_edit.import_export.geff_io import write_geff_over
+from napari_track_edit.membrane.io import (
     MEMBRANE_ARRAY,
     load_membrane_labels,
     save_membrane_labels,
