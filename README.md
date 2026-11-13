@@ -19,6 +19,23 @@ for more details on the concepts and method.
 
 ----------------------------------
 
+## This fork (centaraa/motile_tracker_annotate)
+
+This repository is a fork of
+[napari-track-edit](https://github.com/live-image-tracking-tools/napari-track-edit),
+kept in sync with its `main`. It adds:
+
+- editable per-node annotation columns in the tracks table (check boxes,
+  numbers, comments of up to 150 characters), saved with the geff;
+- measurement columns computed from the masks, refreshed when a mask is edited;
+- membrane labels stored in the geff, shown as an extra labels layer (see
+  [Membrane labels and other analysis results](#membrane-labels-and-other-analysis-results));
+- int32 labels, so node ids above 255 can be selected and painted.
+
+`pip install napari-track-edit` installs the upstream package without these.
+To run the fork, clone this repository and start it with
+`uv run napari-track-edit` (see [`DEVELOPER.md`](DEVELOPER.md)).
+
 ## Installation
 
 Users can download and install an executable application from the github release, or
@@ -76,6 +93,8 @@ from [`Fabrèges et al (2024)`](https://www.science.org/doi/10.1126/science.adh1
 For details, please read the [documentation](https://liveimagetrackingtools.org/napari-track-edit/).
 If you are new to napari-track-edit, you can follow this [tutorial](https://liveimagetrackingtools.org/napari-track-edit/napari-track-edit_tutorial.html) to learn the basics.
 
+https://github.com/user-attachments/assets/cd23271d-bbe6-40c2-80cb-8404136a564a
+
 ## Membrane labels and other analysis results
 
 The analysis of the tracked embryos runs headless in
@@ -98,8 +117,6 @@ What napari-track-edit reads from such a geff (the contract with DestiNuc):
   `path: membrane_labels`, `label_prop: membrane_id`). napari-track-edit shows it
   as a read-only `<name>_membrane` overlay coloured like the nuclei, and keeps it
   when the tracks are saved again (`napari_track_edit.membrane.io`).
-
-https://github.com/user-attachments/assets/cd23271d-bbe6-40c2-80cb-8404136a564a
 
 ## Issues
 
