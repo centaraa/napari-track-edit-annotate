@@ -1,5 +1,3 @@
-from unittest.mock import MagicMock
-
 import numpy as np
 import pytest
 
@@ -43,13 +41,18 @@ def membrane_geff(solution_tracks_3d, tmp_path):
     return path, merged
 
 
-def test_load_shows_membrane_overlay_and_save_keeps_it(viewer, membrane_geff, tmp_path):
+def test_load_shows_membrane_overlay_and_save_keeps_it(
+    viewer, membrane_geff, tmp_path, monkeypatch
+):
     path, merged = membrane_geff
     tracks_viewer = TracksViewer.get_instance(viewer)
     tracks_list = tracks_viewer.tracks_list
     tracks_list.dropdown_menu.setCurrentText("Tracks (geff)")
-    tracks_list.file_dialog.exec_ = MagicMock(return_value=True)
-    tracks_list.file_dialog.selectedFiles = MagicMock(return_value=[str(path)])
+    monkeypatch.setattr(
+        "napari_track_edit.data_views.views_coordinator.tracks_list."
+        "QFileDialog.getExistingDirectory",
+        lambda *a, **k: str(path),
+    )
 
     tracks_list.load_tracks()
 
