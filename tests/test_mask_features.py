@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from funtracks.annotators import RegionpropsAnnotator
 
-from motile_tracker.mask_features import (
+from napari_track_edit.mask_features import (
     EQUIV_DIAMETER_KEY,
     EXTRA_FEATURES,
     NUM_PIXELS_KEY,

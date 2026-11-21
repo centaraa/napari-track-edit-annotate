@@ -1,11 +1,14 @@
-from unittest.mock import MagicMock, patch
-
+import numpy as np
 import pytest
+from napari_orthogonal_views.ortho_view_manager import _VIEWER_MANAGERS
 
-from motile_tracker.application_menus.visualization_widget import (
+from napari_track_edit.application_menus.visualization_widget import (
     VisualizationWidget,
 )
-from motile_tracker.data_views.views_coordinator.tracks_viewer import TracksViewer
+from napari_track_edit.data_views.views_coordinator.tracks_viewer import TracksViewer
+
+# These tests need napari's Qt viewer, see the viewer fixture in conftest.py.
+pytestmark = pytest.mark.qt_viewer
 
 
 @pytest.fixture(autouse=True)
@@ -102,6 +105,54 @@ def test_contour_checkbox_updates_layer(visualization_widget):
 
     assert layer.highlight_contour is False
     assert layer.foreground_contour is True
+
+
+def test_overlay_checkbox_toggles_text_overlay(visualization_widget):
+    """Toggling the keybinds checkbox shows/hides the viewer text overlay.
+
+    Regression: the checkbox was wired to 'stateChanged', which hands over Qt's check
+    state as an int (2 when checked). napari's TextOverlay.visible is a strict
+    pydantic bool, so checking the box raised a ValidationError instead.
+    """
+
+    widget, _ = visualization_widget
+    checkbox = widget.show_viewer_overlay
+
+    # starts checked, matching the overlay being shown with the display mode
+    assert checkbox.isChecked()
+
+    checkbox.setChecked(False)
+    assert widget.viewer.text_overlay.visible is False
+
+    checkbox.setChecked(True)
+    assert widget.viewer.text_overlay.visible is True
+
+
+def test_overlay_stays_hidden_when_changing_display_mode(visualization_widget):
+    """Regression: set_display_mode (e.g. pressing Q) forced the text overlay to be
+    visible again, while the checkbox stayed unchecked."""
+
+    widget, tracks_viewer = visualization_widget
+    widget.show_viewer_overlay.setChecked(False)
+
+    for mode in ("lineage", "group", "all"):
+        tracks_viewer.set_display_mode(mode)
+        assert widget.viewer.text_overlay.visible is False
+        assert not widget.show_viewer_overlay.isChecked()
+
+    widget.show_viewer_overlay.setChecked(True)
+    tracks_viewer.set_display_mode("lineage")
+    assert widget.viewer.text_overlay.visible is True
+
+
+def test_reopened_widget_shows_current_overlay_state(visualization_widget, qtbot):
+    widget, _ = visualization_widget
+    widget.show_viewer_overlay.setChecked(False)
+
+    new_widget = VisualizationWidget(widget.viewer)
+    qtbot.addWidget(new_widget)
+
+    assert not new_widget.show_viewer_overlay.isChecked()
 
 
 @pytest.mark.parametrize(
@@ -219,180 +270,146 @@ def test_selecting_node_does_not_highlight_same_track_nodes(
 
 # Ortho-views integration tests
 class TestOrthoViewsIntegration:
-    """Tests for orthogonal views checkbox and initialization."""
+    """The 'Orthogonal views' checkbox, against a real ortho view manager."""
 
-    def test_ortho_views_checkbox_initially_unchecked(self, visualization_widget):
-        """Test that the ortho views checkbox starts unchecked."""
+    @pytest.fixture
+    def manager(self, viewer):
+        yield
+        if viewer in _VIEWER_MANAGERS:
+            _VIEWER_MANAGERS[viewer].cleanup()
+
+    def test_checkbox_initially_unchecked(self, visualization_widget):
         widget, _ = visualization_widget
         assert not widget.show_ortho_views.isChecked()
 
-    @patch("motile_tracker.application_menus.visualization_widget._VIEWER_MANAGERS", {})
-    @patch(
-        "motile_tracker.application_menus.visualization_widget.initialize_ortho_views"
-    )
-    def test_initialize_ortho_views_viewer_not_in_managers(
-        self, mock_init, visualization_widget
+    def test_checkbox_shows_and_hides_ortho_views(self, visualization_widget, manager):
+        widget, _ = visualization_widget
+
+        widget.show_ortho_views.setChecked(True)
+        ortho = _VIEWER_MANAGERS[widget.viewer]
+        assert ortho.is_shown()
+
+        widget.show_ortho_views.setChecked(False)
+        assert not ortho.is_shown()
+
+    def test_ortho_manager_checkbox_is_hidden(self, visualization_widget, manager):
+        """napari_track_edit's own checkbox is the only user-facing control for
+        orthogonal views: the ortho view manager's built-in checkbox (on its
+        separate Controls tab) is hidden rather than kept in sync with it."""
+        widget, _ = visualization_widget
+        widget.show_ortho_views.setChecked(True)
+        ortho_checkbox = _VIEWER_MANAGERS[
+            widget.viewer
+        ].main_controls_widget.show_checkbox
+
+        assert ortho_checkbox.isHidden()
+
+    def test_ortho_views_survive_closing_the_widget(
+        self, visualization_widget, manager, qtbot
     ):
-        """Test ortho views initialization when viewer is not already in _VIEWER_MANAGERS."""
-        widget, _ = visualization_widget
+        """Regression: after closing the visualization widget with ortho views active,
+        toggling the ortho views' own checkbox raised because the deleted widget was
+        still connected. Reopening the widget picks up the existing ortho views."""
 
-        mock_manager = MagicMock()
-        mock_manager.main_controls_widget.show_orth_views.connect = MagicMock(
-            return_value=MagicMock()
+        viewer = visualization_widget[0].viewer
+        # not registered with qtbot, because this test deletes it
+        widget = VisualizationWidget(viewer)
+        widget.show_ortho_views.setChecked(True)
+        ortho = _VIEWER_MANAGERS[viewer]
+
+        # what MenuManager does when the dock is closed
+        widget.cleanup()
+        widget.setParent(None)
+        widget.deleteLater()
+        qtbot.wait(10)
+
+        ortho.main_controls_widget.show_checkbox.setChecked(False)
+        assert not ortho.is_shown()
+        ortho.main_controls_widget.show_checkbox.setChecked(True)
+        assert ortho.is_shown()
+
+        new_widget = VisualizationWidget(viewer)
+        qtbot.addWidget(new_widget)
+        assert new_widget.show_ortho_views.isChecked()
+
+
+class TestColorByWidget:
+    """The "Color by" dropdown: what it offers and what picking one does."""
+
+    @pytest.fixture
+    def group(self, visualization_widget):
+        _widget, tracks_viewer = visualization_widget
+        tracks_viewer.tracks.add_feature(
+            "my_group",
+            {
+                "feature_type": "node",
+                "value_type": "bool",
+                "num_values": 1,
+                "display_name": "my_group",
+                "default_value": False,
+            },
         )
-        mock_init.return_value = mock_manager
+        return "my_group"
 
-        # Trigger checkbox
-        widget.show_ortho_views.setChecked(True)
+    def test_lists_none_track_and_lineage(self, visualization_widget):
+        widget, _tracks_viewer = visualization_widget
+        combo = widget.color_by_widget.combo
 
-        # verify initialize_ortho_views was called
-        mock_init.assert_called_once_with(widget.viewer)
+        labels = [combo.itemText(i) for i in range(combo.count())]
 
-        # verify manager was stored
-        assert widget.orth_view_manager is not None
-        assert widget.orth_views_connection is not None
+        assert labels == ["None", "Tracklet ID", "Lineage ID"]
 
-    def test_initialize_ortho_views_with_existing_manager(self, visualization_widget):
-        """Test ortho views when viewer is already in _VIEWER_MANAGERS."""
-        widget, _ = visualization_widget
+    def test_starts_on_the_feature_in_use(self, visualization_widget):
+        widget, tracks_viewer = visualization_widget
+        combo = widget.color_by_widget.combo
 
-        mock_manager = MagicMock()
-        mock_manager.show = MagicMock()
-        mock_manager.hide = MagicMock()
+        assert combo.itemData(combo.currentIndex()) == tracks_viewer.color_feature_key
 
-        # Mock the _VIEWER_MANAGERS to already contain this viewer
-        with patch(
-            "motile_tracker.application_menus.visualization_widget._VIEWER_MANAGERS",
-            {widget.viewer: mock_manager},
-        ):
-            widget.show_ortho_views.setChecked(True)
+    def test_picking_a_feature_sets_it_on_the_viewer(self, visualization_widget):
+        widget, tracks_viewer = visualization_widget
+        combo = widget.color_by_widget.combo
+        lineage_key = tracks_viewer.tracks.features.lineage_key
 
-            # verify manager.show() was called
-            mock_manager.show.assert_called_once()
+        combo.setCurrentIndex(combo.findData(lineage_key))
 
-    def test_ortho_views_hide_when_unchecked(self, visualization_widget):
-        """Test that ortho views are hidden and resized when checkbox is unchecked."""
-        widget, _ = visualization_widget
+        assert tracks_viewer.color_feature_key == lineage_key
 
-        mock_manager = MagicMock()
-        mock_manager.show = MagicMock()
-        mock_manager.hide = MagicMock()
-        mock_manager.set_splitter_sizes = MagicMock()
+    def test_picking_none_colors_every_node_the_same(self, visualization_widget):
+        widget, tracks_viewer = visualization_widget
 
-        with patch(
-            "motile_tracker.application_menus.visualization_widget._VIEWER_MANAGERS",
-            {widget.viewer: mock_manager},
-        ):
-            # Check the box first
-            widget.show_ortho_views.setChecked(True)
-            mock_manager.show.assert_called_once()
+        widget.color_by_widget.combo.setCurrentIndex(0)
 
-            # Uncheck the box
-            widget.show_ortho_views.setChecked(False)
+        assert tracks_viewer.color_feature_key is None
+        nodes = list(tracks_viewer.tracks.graph_solution.node_ids())
+        colors = tracks_viewer.colormap.get_colors(nodes)
+        assert np.all(colors[:, :3] == colors[0, :3])
 
-            # Verify hide and set_splitter_sizes were called
-            mock_manager.hide.assert_called_once()
-            mock_manager.set_splitter_sizes.assert_called_once_with(0.0, 0.0)
+    def test_follows_a_change_made_elsewhere(self, visualization_widget):
+        widget, tracks_viewer = visualization_widget
+        lineage_key = tracks_viewer.tracks.features.lineage_key
 
-    @patch(
-        "motile_tracker.application_menus.visualization_widget.initialize_ortho_views"
-    )
-    def test_ortho_views_signal_connection(self, mock_init, visualization_widget):
-        """Test that the ortho view manager's signal is connected to the widget."""
-        widget, _ = visualization_widget
+        tracks_viewer.set_color_feature(lineage_key)
 
-        mock_manager = MagicMock()
-        mock_signal = MagicMock()
-        mock_manager.main_controls_widget.show_orth_views = mock_signal
-        mock_manager.main_controls_widget.destroyed = MagicMock()
-        mock_signal.connect = MagicMock(return_value=MagicMock())
+        combo = widget.color_by_widget.combo
+        assert combo.itemData(combo.currentIndex()) == lineage_key
 
-        mock_init.return_value = mock_manager
-
-        widget.show_ortho_views.setChecked(True)
-
-        # Verify signal was connected to initialize_ortho_views
-        mock_signal.connect.assert_called_once()
-        call_args = mock_signal.connect.call_args[0]
-        assert call_args[0] == widget.initialize_ortho_views
-
-    @patch(
-        "motile_tracker.application_menus.visualization_widget.initialize_ortho_views"
-    )
-    def test_on_ortho_cleanup(self, mock_init, visualization_widget):
-        """Test cleanup when ortho view manager is destroyed."""
-        widget, _ = visualization_widget
-
-        mock_manager = MagicMock()
-        mock_manager.main_controls_widget.show_orth_views = MagicMock()
-        mock_manager.main_controls_widget.destroyed = MagicMock()
-        mock_manager.main_controls_widget.show_orth_views.connect = MagicMock(
-            return_value=MagicMock()
-        )
-
-        mock_init.return_value = mock_manager
-
-        widget.show_ortho_views.setChecked(True)
-
-        # Simulate widget destruction
-        widget._on_ortho_cleanup()
-
-        # Verify checkbox is unchecked and disconnected
-        assert not widget.show_ortho_views.isChecked()
-        assert widget.orth_view_manager is None
-        assert widget.orth_views_connection is None
-
-    @patch(
-        "motile_tracker.application_menus.visualization_widget.initialize_ortho_views"
-    )
-    def test_disconnect_ortho_views_with_valid_connection(
-        self, mock_init, visualization_widget
+    def test_picks_up_a_group_added_after_it_was_built(
+        self, visualization_widget, group
     ):
-        """Test _disconnect_ortho_views with valid connection."""
-        widget, _ = visualization_widget
+        widget, _tracks_viewer = visualization_widget
 
-        mock_manager = MagicMock()
-        mock_signal = MagicMock()
-        mock_manager.main_controls_widget.show_orth_views = mock_signal
-        mock_manager.main_controls_widget.destroyed = MagicMock()
-        mock_signal.connect = MagicMock(return_value=MagicMock())
-        mock_signal.disconnect = MagicMock()
+        widget.color_by_widget._populate()  # what showing the panel does
 
-        mock_init.return_value = mock_manager
+        assert widget.color_by_widget.combo.findData(group) != -1
 
-        widget.show_ortho_views.setChecked(True)
+    def test_repopulating_does_not_change_the_feature(
+        self, visualization_widget, group
+    ):
+        widget, tracks_viewer = visualization_widget
+        tracks_viewer.set_color_feature(group)
 
-        # Disconnect
-        widget._disconnect_ortho_views()
+        widget.color_by_widget._populate()
 
-        # Verify disconnect was called and connection is cleared
-        mock_signal.disconnect.assert_called_once()
-        assert widget.orth_views_connection is None
-        assert widget.orth_view_manager is None
-
-        # No-op, should not raise
-        widget._disconnect_ortho_views()
-
-        assert widget.orth_views_connection is None
-        assert widget.orth_view_manager is None
-
-    def test_initialize_ortho_views_syncs_checkbox_state(self, visualization_widget):
-        """Test that initialize_ortho_views syncs checkbox state."""
-        widget, _ = visualization_widget
-
-        mock_manager = MagicMock()
-        mock_manager.main_controls_widget.show_orth_views = MagicMock()
-        mock_manager.main_controls_widget.destroyed = MagicMock()
-        mock_manager.main_controls_widget.show_orth_views.connect = MagicMock(
-            return_value=MagicMock()
-        )
-
-        with patch(
-            "motile_tracker.application_menus.visualization_widget._VIEWER_MANAGERS",
-            {widget.viewer: mock_manager},
-        ):
-            # Manually call with checked=False (simulating external unchecking)
-            widget.initialize_ortho_views(False)
-
-            # Verify checkbox state is synced
-            assert not widget.show_ortho_views.isChecked()
+        assert tracks_viewer.color_feature_key == group
+        combo = widget.color_by_widget.combo
+        assert combo.itemData(combo.currentIndex()) == group
